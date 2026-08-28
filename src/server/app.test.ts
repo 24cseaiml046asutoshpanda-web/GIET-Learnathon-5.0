@@ -2,9 +2,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { Database } from 'better-sqlite3';
 import { createApp } from './app.ts';
 import { openDatabase } from './db/connection.ts';
 import { seedDatabase } from './db/seed.ts';
+import { RateLimitMiddleware } from './middlewares/rateLimiter.ts';
 
 const PNG = Buffer.from(
 	'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -31,20 +33,34 @@ async function login(app: ReturnType<typeof createApp>, email: string, password:
 	return { res, json, cookie: cookieHeader(res) };
 }
 
-describe('HostelGrievance API baseline', () => {
+describe('HostelGrievance API baseline & Security Tests', () => {
 	let dir: string;
+	let db: Database;
 	let app: ReturnType<typeof createApp>;
 
 	beforeEach(() => {
+		RateLimitMiddleware.reset();
 		dir = mkdtempSync(join(tmpdir(), 'hg-api-'));
-		const db = openDatabase(join(dir, 'hostel.db'));
+		db = openDatabase(join(dir, 'hostel.db'));
 		const uploadDir = join(dir, 'uploads');
 		seedDatabase(db, uploadDir);
 		app = createApp({ db, uploadsDir: uploadDir });
 	});
 
 	afterEach(() => {
+		// Close database connection prior to removing temporary folder (resolves Windows EPERM file locking)
+		if (db) {
+			db.close();
+		}
 		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it('security headers are present in responses', async () => {
+		const res = await app.request('/api/health');
+		expect(res.status).toBe(200);
+		expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+		expect(res.headers.get('x-frame-options')).toBe('DENY');
+		expect(res.headers.get('x-xss-protection')).toBe('1; mode=block');
 	});
 
 	it('login works for dummy student and warden accounts', async () => {
@@ -278,5 +294,14 @@ describe('HostelGrievance API baseline', () => {
 		const json = await res.json();
 		expect(json.code).toBe('not_found');
 		expect(JSON.stringify(json)).not.toMatch(/sqlite|stack|ENOENT/i);
+	});
+
+	it('enforces rate limiting on excessive login attempts', async () => {
+		for (let i = 0; i < 15; i++) {
+			await login(app, 'student@example.test', 'wrongpassword');
+		}
+		const rateLimited = await login(app, 'student@example.test', 'wrongpassword');
+		expect(rateLimited.res.status).toBe(429);
+		expect(rateLimited.json.code).toBe('rate_limit_exceeded');
 	});
 });

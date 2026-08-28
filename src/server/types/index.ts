@@ -106,4 +106,5 @@ export type ErrorCode =
 	| 'unauthorized'
 	| 'not_found'
 	| 'conflict'
+	| 'rate_limit_exceeded'
 	| 'internal';
