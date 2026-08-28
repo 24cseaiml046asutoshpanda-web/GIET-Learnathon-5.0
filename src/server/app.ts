@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { pinoLogger } from 'hono-pino';
 import type { Database } from 'better-sqlite3';
 import type { AppEnv } from './env.ts';
 import { handleError, HttpError } from './http/errors.ts';
@@ -24,6 +25,25 @@ export type CreateAppOptions = {
  */
 export function createApp(options: CreateAppOptions) {
 	const app = new Hono<AppEnv>();
+
+	// Concise console logger via hono-pino (strip headers, cookies, and user-agent)
+	app.use(
+		pinoLogger({
+			pino: {
+				level: 'info'
+			},
+			http: {
+				reqId: false,
+				onReqBindings: () => ({}),
+				onResBindings: () => ({}),
+				onResMessage: (c) => {
+					const resTime = (c.var as any)?.responseTime;
+					const duration = typeof resTime === 'number' ? ` (${Math.round(resTime)}ms)` : '';
+					return `${c.req.method} ${c.req.path} → ${c.res.status}${duration}`;
+				}
+			}
+		})
+	);
 
 	// Inject dependency context variables
 	app.use('*', async (c, next) => {
