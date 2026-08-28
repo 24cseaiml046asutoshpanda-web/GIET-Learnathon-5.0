@@ -7,6 +7,9 @@ import { grievanceRoutes } from './routes/grievances.ts';
 import { attachmentRoutes } from './routes/attachments.ts';
 import { cors } from 'hono/cors';
 import { RateLimitMiddleware } from './middlewares/rateLimiter.ts';
+import { ALLOWED_CORS_ORIGINS } from './config.ts';
+import { bodyLimitMiddleware } from './middlewares/bodyLimit.ts';
+import { csrfMiddleware } from './middlewares/csrf.ts';
 
 export type CreateAppOptions = {
 	db: Database;
@@ -38,8 +41,23 @@ export function createApp(options: CreateAppOptions) {
 		await next();
 	});
 
-	// CORS configuration
-	app.use('/api/*', cors({ origin: (origin) => origin ?? '*', credentials: true }));
+	// CORS Whitelist Configuration
+	app.use(
+		'/api/*',
+		cors({
+			origin: (origin) => {
+				if (!origin) return ALLOWED_CORS_ORIGINS[0];
+				return ALLOWED_CORS_ORIGINS.includes(origin) ? origin : null;
+			},
+			credentials: true
+		})
+	);
+
+	// Body Size Limit Middleware (1 MB for standard JSON payloads)
+	app.use('/api/*', bodyLimitMiddleware());
+
+	// CSRF Protection Middleware on Mutating Endpoints
+	app.use('/api/*', csrfMiddleware());
 
 	// Global API Rate Limiting (max 200 requests per 15 min window)
 	app.use(

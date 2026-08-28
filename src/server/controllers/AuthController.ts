@@ -1,8 +1,11 @@
 import type { Context } from 'hono';
 import type { AppEnv } from '../env.ts';
 import { AuthService } from '../services/AuthService.ts';
-import { clearSessionCookie, optionalToken, setSessionCookie } from '../auth/session.ts';
+import { clearAuthCookies, optionalToken, setAuthCookies } from '../auth/session.ts';
+import { getOrCreateCsrfToken } from '../auth/csrf.ts';
 import { HttpError } from '../http/errors.ts';
+import { getCookie } from 'hono/cookie';
+import { REFRESH_COOKIE_NAME, SESSION_COOKIE } from '../config.ts';
 
 /**
  * AuthController Class
@@ -11,9 +14,7 @@ import { HttpError } from '../http/errors.ts';
 export class AuthController {
 	/**
 	 * Handles POST /api/login
-	 * Authenticates user credentials and sets session cookie.
-	 * 
-	 * @param c Hono Context
+	 * Authenticates user credentials and sets secure access, refresh, and CSRF cookies.
 	 */
 	static async login(c: Context<AppEnv>) {
 		const db = c.get('db');
@@ -32,16 +33,46 @@ export class AuthController {
 		const password = 'password' in body && typeof body.password === 'string' ? body.password : '';
 
 		const result = AuthService.login(db, email, password);
-		setSessionCookie(c, result.token);
+		setAuthCookies(c, result.tokens);
+		const csrfToken = getOrCreateCsrfToken(c);
 
-		return c.json({ user: result.user });
+		return c.json({ user: result.user, csrfToken });
+	}
+
+	/**
+	 * Handles POST /api/refresh
+	 * Refreshes access and refresh tokens.
+	 */
+	static refresh(c: Context<AppEnv>) {
+		const db = c.get('db');
+		const refreshToken =
+			getCookie(c, REFRESH_COOKIE_NAME) ||
+			getCookie(c, SESSION_COOKIE) ||
+			optionalToken(c);
+
+		if (!refreshToken) {
+			throw new HttpError(401, 'unauthenticated', 'Refresh token is required.');
+		}
+
+		const result = AuthService.refreshTokens(db, refreshToken);
+		setAuthCookies(c, result.tokens);
+		const csrfToken = getOrCreateCsrfToken(c);
+
+		return c.json({ user: result.user, csrfToken });
+	}
+
+	/**
+	 * Handles GET /api/csrf-token
+	 * Returns initial CSRF token and sets CSRF cookie.
+	 */
+	static getCsrfToken(c: Context<AppEnv>) {
+		const csrfToken = getOrCreateCsrfToken(c);
+		return c.json({ csrfToken });
 	}
 
 	/**
 	 * Handles POST /api/logout
-	 * Invalidates active session token and clears session cookie.
-	 * 
-	 * @param c Hono Context
+	 * Invalidates active refresh token and clears auth cookies.
 	 */
 	static logout(c: Context<AppEnv>) {
 		const db = c.get('db');
@@ -49,15 +80,13 @@ export class AuthController {
 		if (token) {
 			AuthService.logout(db, token);
 		}
-		clearSessionCookie(c);
+		clearAuthCookies(c);
 		return c.json({ ok: true });
 	}
 
 	/**
 	 * Handles GET /api/me
 	 * Returns current authenticated user profile.
-	 * 
-	 * @param c Hono Context
 	 */
 	static me(c: Context<AppEnv>) {
 		const user = c.get('user');

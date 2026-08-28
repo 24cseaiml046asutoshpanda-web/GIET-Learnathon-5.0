@@ -18,6 +18,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS grievances (
   id TEXT PRIMARY KEY,
   student_id TEXT NOT NULL REFERENCES users(id),
@@ -51,9 +60,12 @@ CREATE INDEX IF NOT EXISTS idx_grievances_student ON grievances(student_id);
 CREATE INDEX IF NOT EXISTS idx_comments_grievance ON comments(grievance_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_grievance ON attachments(grievance_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 `;
 
 export function applySchema(db: Database): void {
 	db.exec('PRAGMA foreign_keys = ON;');
 	db.exec(SCHEMA_SQL);
 }
+

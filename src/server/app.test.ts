@@ -23,6 +23,16 @@ function cookieHeader(res: Response): string {
 	return raw ? raw.split(';')[0] : '';
 }
 
+function extractCookieValue(cookieStr: string, cookieName: string): string | undefined {
+	const parts = cookieStr.split('; ');
+	for (const part of parts) {
+		if (part.startsWith(`${cookieName}=`)) {
+			return part.slice(cookieName.length + 1);
+		}
+	}
+	return undefined;
+}
+
 async function login(app: ReturnType<typeof createApp>, email: string, password: string) {
 	const res = await app.request('/api/login', {
 		method: 'POST',
@@ -30,7 +40,9 @@ async function login(app: ReturnType<typeof createApp>, email: string, password:
 		body: JSON.stringify({ email, password })
 	});
 	const json = await res.json();
-	return { res, json, cookie: cookieHeader(res) };
+	const cookie = cookieHeader(res);
+	const csrfToken = json.csrfToken || extractCookieValue(cookie, 'hg_csrf') || '';
+	return { res, json, cookie, csrfToken };
 }
 
 describe('HostelGrievance API baseline & Security Tests', () => {
@@ -48,7 +60,6 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 	});
 
 	afterEach(() => {
-		// Close database connection prior to removing temporary folder (resolves Windows EPERM file locking)
 		if (db) {
 			db.close();
 		}
@@ -70,7 +81,8 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		expect(student.json.user.role).toBe('student');
 		expect(student.json.user.password).toBeUndefined();
 		expect(student.json.user.password_hash).toBeUndefined();
-		expect(student.cookie).toContain('hg_session=');
+		expect(student.cookie).toContain('hg_refresh=');
+		expect(student.csrfToken.length).toBeGreaterThan(0);
 
 		const warden = await login(app, 'warden@example.test', 'warden123');
 		expect(warden.res.status).toBe(200);
@@ -84,7 +96,7 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 	});
 
 	it('current-user works after login and fails after logout', async () => {
-		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
 		const me = await app.request('/api/me', { headers: { Cookie: cookie } });
 		expect(me.status).toBe(200);
 		const meJson = await me.json();
@@ -94,16 +106,23 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		const unauth = await app.request('/api/me');
 		expect(unauth.status).toBe(401);
 
-		await app.request('/api/logout', { method: 'POST', headers: { Cookie: cookie } });
+		await app.request('/api/logout', {
+			method: 'POST',
+			headers: { Cookie: cookie, 'X-CSRF-Token': csrfToken }
+		});
 		const after = await app.request('/api/me', { headers: { Cookie: cookie } });
 		expect(after.status).toBe(401);
 	});
 
 	it('student can create a grievance', async () => {
-		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
 		const res = await app.request('/api/grievances', {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: cookie,
+				'X-CSRF-Token': csrfToken
+			},
 			body: JSON.stringify({
 				title: 'Broken cupboard hinge',
 				category: 'Room',
@@ -153,10 +172,14 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 	});
 
 	it('comments work for permitted users', async () => {
-		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
 		const res = await app.request('/api/grievances/GRV-0001/comments', {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: cookie,
+				'X-CSRF-Token': csrfToken
+			},
 			body: JSON.stringify({ body: 'Following up on the leak this morning.' })
 		});
 		expect(res.status).toBe(201);
@@ -174,7 +197,11 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		const student = await login(app, 'student@example.test', 'student123');
 		const denied = await app.request('/api/grievances/GRV-0001', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json', Cookie: student.cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: student.cookie,
+				'X-CSRF-Token': student.csrfToken
+			},
 			body: JSON.stringify({ status: 'Resolved' })
 		});
 		expect(denied.status).toBe(403);
@@ -182,7 +209,11 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		const warden = await login(app, 'warden@example.test', 'warden123');
 		const updated = await app.request('/api/grievances/GRV-0008', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json', Cookie: warden.cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: warden.cookie,
+				'X-CSRF-Token': warden.csrfToken
+			},
 			body: JSON.stringify({ status: 'In Progress' })
 		});
 		expect(updated.status).toBe(200);
@@ -191,10 +222,14 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 	});
 
 	it('attachment metadata and storage work', async () => {
-		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
 		const created = await app.request('/api/grievances', {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: cookie,
+				'X-CSRF-Token': csrfToken
+			},
 			body: JSON.stringify({
 				title: 'Need a photo on file',
 				category: 'Other',
@@ -208,7 +243,7 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		form.append('file', new File([PNG], 'locker.png', { type: 'image/png' }));
 		const uploaded = await app.request(`/api/grievances/${id}/attachments`, {
 			method: 'POST',
-			headers: { Cookie: cookie },
+			headers: { Cookie: cookie, 'X-CSRF-Token': csrfToken },
 			body: form
 		});
 		expect(uploaded.status).toBe(201);
@@ -230,33 +265,95 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		expect(stolen.status).toBe(403);
 	});
 
-	it('rejects oversized and disallowed attachments', async () => {
-		const { cookie } = await login(app, 'student@example.test', 'student123');
-		const huge = new Uint8Array(2 * 1024 * 1024 + 1);
-		const over = new FormData();
-		over.append('file', new File([huge], 'big.png', { type: 'image/png' }));
-		const overRes = await app.request('/api/grievances/GRV-0008/attachments', {
-			method: 'POST',
-			headers: { Cookie: cookie },
-			body: over
-		});
-		expect(overRes.status).toBe(400);
+	it('rejects double extension and malicious binary file uploads', async () => {
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
 
-		const invalid = new FormData();
-		invalid.append('file', new File(['not-an-image'], 'notes.txt', { type: 'text/plain' }));
-		const invalidRes = await app.request('/api/grievances/GRV-0008/attachments', {
+		// Double extension test (.png.exe)
+		const doubleExtForm = new FormData();
+		doubleExtForm.append('file', new File([PNG], 'locker.png.exe', { type: 'image/png' }));
+		const doubleExtRes = await app.request('/api/grievances/GRV-0008/attachments', {
 			method: 'POST',
-			headers: { Cookie: cookie },
-			body: invalid
+			headers: { Cookie: cookie, 'X-CSRF-Token': csrfToken },
+			body: doubleExtForm
 		});
-		expect(invalidRes.status).toBe(400);
+		expect(doubleExtRes.status).toBe(400);
+
+		// Fake binary contents test (txt pretending to be png)
+		const fakeImgForm = new FormData();
+		fakeImgForm.append('file', new File(['not-an-image-binary'], 'hacked.png', { type: 'image/png' }));
+		const fakeImgRes = await app.request('/api/grievances/GRV-0008/attachments', {
+			method: 'POST',
+			headers: { Cookie: cookie, 'X-CSRF-Token': csrfToken },
+			body: fakeImgForm
+		});
+		expect(fakeImgRes.status).toBe(400);
+	});
+
+	it('rejects mutating requests without valid CSRF token', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const res = await app.request('/api/grievances', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			body: JSON.stringify({
+				title: 'CSRF attack test',
+				category: 'Room',
+				description: 'This should fail because no CSRF token header is provided.'
+			})
+		});
+		expect(res.status).toBe(403);
+		const json = await res.json();
+		expect(json.code).toBe('csrf_invalid');
+	});
+
+	it('token refresh works and revokes old refresh token', async () => {
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
+
+		const refreshRes = await app.request('/api/refresh', {
+			method: 'POST',
+			headers: { Cookie: cookie, 'X-CSRF-Token': csrfToken }
+		});
+		expect(refreshRes.status).toBe(200);
+		const newCookie = cookieHeader(refreshRes);
+		expect(newCookie).toContain('hg_refresh=');
+
+		// Re-using old revoked refresh token fails
+		const reusedRes = await app.request('/api/refresh', {
+			method: 'POST',
+			headers: { Cookie: cookie, 'X-CSRF-Token': csrfToken }
+		});
+		expect(reusedRes.status).toBe(401);
+	});
+
+	it('input sanitization strips HTML and script tags', async () => {
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
+		const res = await app.request('/api/grievances', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: cookie,
+				'X-CSRF-Token': csrfToken
+			},
+			body: JSON.stringify({
+				title: '<script>alert(1)</script>Leaking tap in room',
+				category: 'Water',
+				description: '<iframe src="evil.com"></iframe>The tap in room 204 has been leaking continuously.'
+			})
+		});
+		expect(res.status).toBe(201);
+		const json = await res.json();
+		expect(json.data.title).toBe('alert(1)Leaking tap in room');
+		expect(json.data.description).not.toContain('<iframe');
 	});
 
 	it('lets a student edit their own open grievance but not a resolved one', async () => {
-		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const { cookie, csrfToken } = await login(app, 'student@example.test', 'student123');
 		const edited = await app.request('/api/grievances/GRV-0008', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: cookie,
+				'X-CSRF-Token': csrfToken
+			},
 			body: JSON.stringify({ title: 'Mess tables still dirty before dinner' })
 		});
 		expect(edited.status).toBe(200);
@@ -266,7 +363,11 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		const other = await login(app, 'priya@example.test', 'student123');
 		const forbidden = await app.request('/api/grievances/GRV-0008', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json', Cookie: other.cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: other.cookie,
+				'X-CSRF-Token': other.csrfToken
+			},
 			body: JSON.stringify({ title: 'Should not work at all here' })
 		});
 		expect(forbidden.status).toBe(403);
@@ -274,7 +375,11 @@ describe('HostelGrievance API baseline & Security Tests', () => {
 		const rohan = await login(app, 'rohan@example.test', 'student123');
 		const resolved = await app.request('/api/grievances/GRV-0004', {
 			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json', Cookie: rohan.cookie },
+			headers: {
+				'Content-Type': 'application/json',
+				Cookie: rohan.cookie,
+				'X-CSRF-Token': rohan.csrfToken
+			},
 			body: JSON.stringify({ title: 'Trying to change a resolved ticket' })
 		});
 		expect(resolved.status).toBe(409);

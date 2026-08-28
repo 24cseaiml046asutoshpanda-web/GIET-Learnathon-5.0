@@ -24,12 +24,18 @@ import {
 import type {
 	CommentRow,
 	AttachmentRow,
-	GrievanceStatusDb,
 	PublicComment,
 	PublicGrievance,
 	PublicAttachment,
 	SessionUser
 } from '../types/index.ts';
+import {
+	sanitizeString,
+	validateCategory,
+	validateCommentBody,
+	validateDescription,
+	validateTitle
+} from '../utils/sanitizer.ts';
 
 function nowIso(): string {
 	return new Date().toISOString();
@@ -42,11 +48,6 @@ function nowIso(): string {
 export class GrievanceService {
 	/**
 	 * Lists grievances accessible to the current user.
-	 * Wardens see all grievances; Students see only their submitted grievances.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param user Authenticated session user
-	 * @returns List of public grievance DTOs
 	 */
 	static listGrievances(db: Database, user: SessionUser): PublicGrievance[] {
 		const rows =
@@ -58,27 +59,16 @@ export class GrievanceService {
 
 	/**
 	 * Retrieves a single grievance by ID after enforcing RBAC view permission.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param id Grievance ID
-	 * @param user Authenticated session user
-	 * @returns Public grievance DTO
 	 */
 	static getGrievanceById(db: Database, id: string, user: SessionUser): PublicGrievance {
-		const row = requireGrievance(db, id);
+		const cleanId = sanitizeString(id);
+		const row = requireGrievance(db, cleanId);
 		assertCanViewGrievance(user, row);
 		return assembleGrievance(db, row);
 	}
 
 	/**
-	 * Creates a new grievance submitted by a student.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param uploadsDir Upload directory path
-	 * @param user Authenticated session user (must be student)
-	 * @param data Grievance inputs (title, category, description)
-	 * @param upload Optional uploaded file
-	 * @returns Newly created public grievance DTO
+	 * Creates a new grievance submitted by a student after validating and sanitizing inputs.
 	 */
 	static async createGrievance(
 		db: Database,
@@ -91,17 +81,11 @@ export class GrievanceService {
 			throw new HttpError(403, 'unauthorized', 'Only students can file grievances.');
 		}
 
-		const title = data.title.trim();
-		const description = data.description.trim();
+		const title = validateTitle(data.title);
+		const categoryInput = validateCategory(data.category);
+		const description = validateDescription(data.description);
 
-		if (title.length < 5) {
-			throw new HttpError(400, 'bad_request', 'Title must be at least 5 characters.');
-		}
-		if (description.length < 20) {
-			throw new HttpError(400, 'bad_request', 'Description must be at least 20 characters.');
-		}
-
-		const parsedCategory = parseCategory(data.category);
+		const parsedCategory = parseCategory(categoryInput);
 		const id = nextGrievanceId(db);
 		const ts = nowIso();
 
@@ -133,15 +117,7 @@ export class GrievanceService {
 	}
 
 	/**
-	 * Updates a grievance according to RBAC restrictions.
-	 * - Student: Can update title/category/description of own open grievance. Cannot change status.
-	 * - Warden: Can only update status of any grievance.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param id Grievance ID
-	 * @param user Authenticated session user
-	 * @param body Patch parameters
-	 * @returns Updated public grievance DTO
+	 * Updates a grievance according to RBAC restrictions and sanitized fields.
 	 */
 	static updateGrievance(
 		db: Database,
@@ -149,7 +125,8 @@ export class GrievanceService {
 		user: SessionUser,
 		body: Record<string, unknown>
 	): PublicGrievance {
-		const row = requireGrievance(db, id);
+		const cleanId = sanitizeString(id);
+		const row = requireGrievance(db, cleanId);
 
 		const title = 'title' in body ? body.title : undefined;
 		const description = 'description' in body ? body.description : undefined;
@@ -165,11 +142,9 @@ export class GrievanceService {
 
 		switch (user.role) {
 			case 'student': {
-				// Verify ownership
 				if (row.student_id !== user.id) {
 					throw new HttpError(403, 'unauthorized', 'You cannot edit this grievance.');
 				}
-				// Verify status restriction for student
 				if (wantsStatus) {
 					throw new HttpError(403, 'unauthorized', 'Students cannot update grievance status.');
 				}
@@ -182,22 +157,14 @@ export class GrievanceService {
 				let nextCategory = row.category;
 
 				if (title !== undefined) {
-					if (typeof title !== 'string' || title.trim().length < 5) {
-						throw new HttpError(400, 'bad_request', 'Title must be at least 5 characters.');
-					}
-					nextTitle = title.trim();
+					nextTitle = validateTitle(title);
 				}
 				if (description !== undefined) {
-					if (typeof description !== 'string' || description.trim().length < 20) {
-						throw new HttpError(400, 'bad_request', 'Description must be at least 20 characters.');
-					}
-					nextDescription = description.trim();
+					nextDescription = validateDescription(description);
 				}
 				if (category !== undefined) {
-					if (typeof category !== 'string') {
-						throw new HttpError(400, 'bad_request', 'Invalid grievance category.');
-					}
-					nextCategory = parseCategory(category);
+					const cat = validateCategory(category);
+					nextCategory = parseCategory(cat);
 				}
 
 				const ts = nowIso();
@@ -213,7 +180,8 @@ export class GrievanceService {
 				if (typeof status !== 'string') {
 					throw new HttpError(400, 'bad_request', 'Invalid grievance status.');
 				}
-				const nextStatus = statusToDb(status);
+				const sanitizedStatus = sanitizeString(status);
+				const nextStatus = statusToDb(sanitizedStatus);
 				const ts = nowIso();
 				db.prepare('UPDATE grievances SET status = ?, updated_at = ? WHERE id = ?').run(
 					nextStatus,
@@ -229,14 +197,10 @@ export class GrievanceService {
 
 	/**
 	 * Lists comments for a grievance if user has view permission.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param grievanceId Grievance ID
-	 * @param user Authenticated session user
-	 * @returns List of public comment DTOs
 	 */
 	static listComments(db: Database, grievanceId: string, user: SessionUser): PublicComment[] {
-		const row = requireGrievance(db, grievanceId);
+		const cleanId = sanitizeString(grievanceId);
+		const row = requireGrievance(db, cleanId);
 		assertCanViewGrievance(user, row);
 
 		return listCommentRows(db, row.id).map((comment) => {
@@ -249,13 +213,7 @@ export class GrievanceService {
 	}
 
 	/**
-	 * Adds a comment to a grievance.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param grievanceId Grievance ID
-	 * @param user Authenticated session user
-	 * @param commentText Text body of comment
-	 * @returns Created public comment DTO
+	 * Adds a comment to a grievance with input sanitization.
 	 */
 	static addComment(
 		db: Database,
@@ -263,13 +221,11 @@ export class GrievanceService {
 		user: SessionUser,
 		commentText: string
 	): PublicComment {
-		const row = requireGrievance(db, grievanceId);
+		const cleanId = sanitizeString(grievanceId);
+		const row = requireGrievance(db, cleanId);
 		assertCanViewGrievance(user, row);
 
-		const text = commentText.trim();
-		if (!text) {
-			throw new HttpError(400, 'bad_request', 'Comment cannot be empty.');
-		}
+		const text = validateCommentBody(commentText);
 
 		const id = nextCommentId(db);
 		const ts = nowIso();
@@ -288,14 +244,6 @@ export class GrievanceService {
 
 	/**
 	 * Adds an attachment upload to an existing grievance.
-	 * Restricted to the student owner of an open grievance.
-	 * 
-	 * @param db SQLite Database instance
-	 * @param uploadsDir Upload directory path
-	 * @param grievanceId Grievance ID
-	 * @param user Authenticated session user
-	 * @param upload File upload payload
-	 * @returns Saved public attachment DTO
 	 */
 	static async addAttachment(
 		db: Database,
@@ -304,7 +252,8 @@ export class GrievanceService {
 		user: SessionUser,
 		upload: File
 	): Promise<PublicAttachment> {
-		const row = requireGrievance(db, grievanceId);
+		const cleanId = sanitizeString(grievanceId);
+		const row = requireGrievance(db, cleanId);
 		if (user.role !== 'student' || row.student_id !== user.id) {
 			throw new HttpError(403, 'unauthorized', 'Only the student owner can add attachments.');
 		}

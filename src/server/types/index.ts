@@ -107,4 +107,6 @@ export type ErrorCode =
 	| 'not_found'
 	| 'conflict'
 	| 'rate_limit_exceeded'
+	| 'payload_too_large'
+	| 'csrf_invalid'
 	| 'internal';
